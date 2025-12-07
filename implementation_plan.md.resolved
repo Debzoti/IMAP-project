@@ -1,0 +1,1800 @@
+# ReachInbox Assignment - Detailed Module-by-Module Implementation Plan
+
+A comprehensive guide to building a unified email inbox aggregator with AI categorization, real-time sync, and smart reply suggestions.
+
+---
+
+## Module Architecture Overview
+
+```mermaid
+graph TB
+    subgraph "Frontend Layer"
+        UI[React UI]
+    end
+    
+    subgraph "Backend Services"
+        API[Express API Server]
+        EmailSync[Email Sync Service]
+        AIService[AI Categorization Service]
+        SearchService[Search Service]
+        NotificationService[Notification Service]
+        RAGService[RAG Reply Service]
+    end
+    
+    subgraph "Data Layer"
+        PG[(PostgreSQL)]
+        ES[(Elasticsearch)]
+        VDB[(Vector DB)]
+    end
+    
+    subgraph "External Services"
+        IMAP[IMAP Servers]
+        OpenAI[OpenAI API]
+        Slack[Slack API]
+        Webhook[Webhook.site]
+    end
+    
+    UI --> API
+    API --> EmailSync
+    API --> SearchService
+    API --> AIService
+    API --> RAGService
+    
+    EmailSync --> IMAP
+    EmailSync --> PG
+    EmailSync --> ES
+    EmailSync --> AIService
+    
+    AIService --> OpenAI
+    AIService --> NotificationService
+    
+    NotificationService --> Slack
+    NotificationService --> Webhook
+    
+    SearchService --> ES
+    RAGService --> VDB
+    RAGService --> OpenAI
+```
+
+---
+
+## Module 1: Project Foundation & Infrastructure
+
+### 1.1 Project Initialization
+
+**Goal**: Setup the basic project structure with TypeScript and necessary tooling.
+
+**Steps**:
+
+```bash
+# Create project root
+mkdir reachinbox-assignment
+cd reachinbox-assignment
+
+# Initialize backend
+mkdir backend
+cd backend
+npm init -y
+```
+
+**Dependencies**:
+```bash
+# Email handling
+npm install imap mailparser
+
+# Elasticsearch
+npm install @elastic/elasticsearch
+
+# API Framework - Hono
+npm install hono @hono/node-server
+npm install --save-dev @types/node
+
+# Authentication - BetterAuth
+npm install better-auth
+
+# Utils
+npm install axios
+
+# AI & Vector DB
+npm install openai pinecone-client langchain
+
+# Notifications
+npm install @slack/web-api
+
+# Development
+npm install --save-dev nodemon ts-node tsx @types/bcryptjs @types/jsonwebtoken
+
+# Initialize TypeScript
+npx tsc --init
+```
+
+**File Structure**:
+```
+backend/
+├── src/
+│   ├── config/
+│   │   ├── database.ts       # Prisma client initialization
+│   │   ├── elasticsearch.ts  # ES client setup
+│   │   ├── auth.ts           # BetterAuth configuration
+│   │   └── env.ts            # Environment validation
+│   ├── services/
+│   │   ├── email/
+│   │   │   ├── imap.service.ts
+│   │   │   ├── parser.service.ts
+│   │   │   └── sync.service.ts
+│   │   ├── ai/
+│   │   │   ├── categorization.service.ts
+│   │   │   └── rag.service.ts
+│   │   ├── search/
+│   │   │   └── elasticsearch.service.ts
+│   │   └── notification/
+│   │       ├── slack.service.ts
+│   │       └── webhook.service.ts
+│   ├── routes/
+│   │   ├── email.routes.ts
+│   │   ├── search.routes.ts
+│   │   ├── auth.routes.ts
+│   │   └── reply.routes.ts
+│   ├── middleware/
+│   │   ├── auth.middleware.ts
+│   │   └── error.middleware.ts
+│   ├── types/
+│   │   ├── email.types.ts
+│   │   └── api.types.ts
+│   ├── utils/
+│   │   ├── logger.ts
+│   │   └── error-handler.ts
+│   └── index.ts
+├── prisma/
+│   └── schema.prisma
+├── api/
+│   └── routes.rest           # REST Client test file
+├── .env
+├── .env.example
+├── tsconfig.json
+└── package.json
+```
+
+**tsconfig.json** configuration:
+```json
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "commonjs",
+    "lib": ["ES2020"],
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules"]
+}
+```
+
+---
+
+### 1.2 Database Setup (PostgreSQL + Elasticsearch)
+
+**Docker Compose Configuration**:
+
+Create `docker-compose.yml` in project root:
+
+```yaml
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: reachinbox-postgres
+    environment:
+      POSTGRES_USER: reachinbox
+      POSTGRES_PASSWORD: reachinbox123
+      POSTGRES_DB: reachinbox
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reachinbox"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.5.0
+    container_name: reachinbox-elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  postgres_data:
+  es_data:
+```
+
+**Start services**:
+```bash
+docker-compose up -d
+```
+
+---
+
+### 1.3 Prisma ORM Setup
+
+**Install Prisma**:
+```bash
+npm install @prisma/client
+npm install --save-dev prisma
+npx prisma init
+```
+
+**Prisma Schema** (`prisma/schema.prisma`):
+
+```prisma
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model EmailAccount {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  provider  String   // "gmail" or "outlook"
+  imapHost  String
+  imapPort  Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  emails Email[]
+  
+  @@map("email_accounts")
+}
+
+model Email {
+  id          String   @id @default(cuid())
+  accountId   String
+  account     EmailAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  
+  messageId   String   @unique  // IMAP message ID
+  subject     String
+  from        String
+  to          String
+  cc          String?
+  bcc         String?
+  
+  textBody    String?  @db.Text
+  htmlBody    String?  @db.Text
+  
+  category    String?  // AI categorization result
+  folder      String   // INBOX, SENT, DRAFT, etc.
+  
+  hasAttachments Boolean @default(false)
+  isRead      Boolean  @default(false)
+  
+  receivedAt  DateTime
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([accountId])
+  @@index([category])
+  @@index([receivedAt])
+  @@index([folder])
+  @@map("emails")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String?
+  password  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  sessions Session[]
+  
+  @@map("users")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  
+  @@index([userId])
+  @@map("sessions")
+}
+
+model AICategory {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  color       String?  // For UI display
+  
+  createdAt   DateTime @default(now())
+  
+  @@map("ai_categories")
+}
+```
+
+**Run migration**:
+```bash
+npx prisma migrate dev --name init
+npx prisma generate
+```
+
+---
+
+### 1.4 Environment Configuration
+
+**Create `.env.example`**:
+```env
+# Database
+DATABASE_URL="postgresql://reachinbox:reachinbox123@localhost:5432/reachinbox"
+
+# Elasticsearch
+ELASTICSEARCH_URL="http://localhost:9200"
+
+# Email Accounts (Gmail)
+EMAIL_1_ADDRESS="your-email@gmail.com"
+EMAIL_1_PASSWORD="your-app-password"
+EMAIL_1_IMAP_HOST="imap.gmail.com"
+EMAIL_1_IMAP_PORT="993"
+
+EMAIL_2_ADDRESS="another-email@gmail.com"
+EMAIL_2_PASSWORD="another-app-password"
+EMAIL_2_IMAP_HOST="imap.gmail.com"
+EMAIL_2_IMAP_PORT="993"
+
+# OpenAI
+OPENAI_API_KEY="sk-..."
+
+# Slack
+SLACK_BOT_TOKEN="xoxb-..."
+SLACK_CHANNEL_ID="C..."
+
+# Webhook
+WEBHOOK_URL="https://webhook.site/your-unique-url"
+
+# Vector DB (Pinecone)
+PINECONE_API_KEY="..."
+PINECONE_ENVIRONMENT="..."
+PINECONE_INDEX_NAME="reachinbox-embeddings"
+
+# Authentication
+JWT_SECRET="your-super-secret-jwt-key-change-this"
+JWT_EXPIRES_IN="7d"
+
+# Server
+PORT=3000
+NODE_ENV="development"
+```
+
+**Copy to `.env`**:
+```bash
+cp .env.example .env
+# Edit .env with your actual credentials
+```
+
+---
+
+## Module 2: Email Sync Service (Level 1)
+
+### 2.1 IMAP Connection Service
+
+**Install dependencies**:
+```bash
+npm install imap mailparser
+npm install --save-dev @types/imap @types/mailparser
+```
+
+**Create `src/types/email.types.ts`**:
+
+```typescript
+export interface EmailAccountConfig {
+  id: string;
+  email: string;
+  password: string;
+  imapHost: string;
+  imapPort: number;
+  provider: 'gmail' | 'outlook';
+}
+
+export interface ParsedEmail {
+  messageId: string;
+  subject: string;
+  from: string;
+  to: string;
+  cc?: string;
+  bcc?: string;
+  textBody?: string;
+  htmlBody?: string;
+  folder: string;
+  hasAttachments: boolean;
+  receivedAt: Date;
+}
+
+export interface EmailSyncStatus {
+  accountId: string;
+  status: 'connected' | 'disconnected' | 'error';
+  lastSync?: Date;
+  error?: string;
+}
+```
+
+**Create `src/services/email/imap.service.ts`**:
+
+```typescript
+import Imap from 'imap';
+import { EventEmitter } from 'events';
+import { EmailAccountConfig } from '../../types/email.types';
+
+export class ImapService extends EventEmitter {
+  private imap: Imap | null = null;
+  private accountConfig: EmailAccountConfig;
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 5;
+
+  constructor(accountConfig: EmailAccountConfig) {
+    super();
+    this.accountConfig = accountConfig;
+  }
+
+  async connect(): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.imap = new Imap({
+        user: this.accountConfig.email,
+        password: this.accountConfig.password,
+        host: this.accountConfig.imapHost,
+        port: this.accountConfig.imapPort,
+        tls: true,
+        tlsOptions: { rejectUnauthorized: false },
+        keepalive: true,
+      });
+
+      this.imap.once('ready', () => {
+        console.log(`✅ IMAP connected: ${this.accountConfig.email}`);
+        this.reconnectAttempts = 0;
+        this.setupIdleMode();
+        resolve();
+      });
+
+      this.imap.once('error', (err) => {
+        console.error(`❌ IMAP error for ${this.accountConfig.email}:`, err);
+        this.handleReconnect();
+        reject(err);
+      });
+
+      this.imap.once('end', () => {
+        console.log(`🔌 IMAP connection ended: ${this.accountConfig.email}`);
+        this.handleReconnect();
+      });
+
+      this.imap.connect();
+    });
+  }
+
+  private setupIdleMode(): void {
+    if (!this.imap) return;
+
+    this.imap.openBox('INBOX', false, (err, box) => {
+      if (err) {
+        console.error('Error opening INBOX:', err);
+        return;
+      }
+
+      console.log(`📬 Monitoring INBOX for ${this.accountConfig.email}`);
+
+      // Start IDLE mode
+      this.imap!.on('mail', (numNewMsgs) => {
+        console.log(`📨 ${numNewMsgs} new email(s) received`);
+        this.emit('newMail', numNewMsgs);
+      });
+
+      // Keep connection alive with IDLE
+      const startIdle = () => {
+        if (this.imap && this.imap.state === 'authenticated') {
+          this.imap.idle();
+        }
+      };
+
+      this.imap.on('idle', startIdle);
+      startIdle();
+    });
+  }
+
+  async fetchEmails(
+    folder: string = 'INBOX',
+    daysBack: number = 30
+  ): Promise<number[]> {
+    return new Promise((resolve, reject) => {
+      if (!this.imap) {
+        reject(new Error('IMAP not connected'));
+        return;
+      }
+
+      this.imap.openBox(folder, true, (err, box) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+
+        const since = new Date();
+        since.setDate(since.getDate() - daysBack);
+
+        const searchCriteria = [['SINCE', since]];
+
+        this.imap!.search(searchCriteria, (err, results) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+
+          console.log(`📧 Found ${results.length} emails in ${folder}`);
+          resolve(results);
+        });
+      });
+    });
+  }
+
+  async fetchEmailById(uid: number): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+      if (!this.imap) {
+        reject(new Error('IMAP not connected'));
+        return;
+      }
+
+      const fetch = this.imap.fetch(uid, {
+        bodies: '',
+        struct: true,
+      });
+
+      let emailBuffer = Buffer.alloc(0);
+
+      fetch.on('message', (msg) => {
+        msg.on('body', (stream) => {
+          stream.on('data', (chunk) => {
+            emailBuffer = Buffer.concat([emailBuffer, chunk]);
+          });
+        });
+
+        msg.once('end', () => {
+          resolve(emailBuffer);
+        });
+      });
+
+      fetch.once('error', reject);
+      fetch.once('end', () => {
+        if (emailBuffer.length === 0) {
+          reject(new Error('No email data received'));
+        }
+      });
+    });
+  }
+
+  private handleReconnect(): void {
+    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+      console.error(`❌ Max reconnection attempts reached for ${this.accountConfig.email}`);
+      this.emit('maxReconnectReached');
+      return;
+    }
+
+    this.reconnectAttempts++;
+    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
+
+    console.log(`🔄 Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
+
+    setTimeout(() => {
+      this.connect().catch(console.error);
+    }, delay);
+  }
+
+  disconnect(): void {
+    if (this.imap) {
+      this.imap.end();
+      this.imap = null;
+    }
+  }
+}
+```
+
+---
+
+### 2.2 Email Parser Service
+
+**Create `src/services/email/parser.service.ts`**:
+
+```typescript
+import { simpleParser, ParsedMail } from 'mailparser';
+import { ParsedEmail } from '../../types/email.types';
+
+export class EmailParserService {
+  async parseEmail(emailBuffer: Buffer, folder: string = 'INBOX'): Promise<ParsedEmail> {
+    const parsed: ParsedMail = await simpleParser(emailBuffer);
+
+    return {
+      messageId: parsed.messageId || `${Date.now()}-${Math.random()}`,
+      subject: parsed.subject || '(No Subject)',
+      from: this.extractEmail(parsed.from),
+      to: this.extractEmail(parsed.to),
+      cc: this.extractEmail(parsed.cc),
+      bcc: this.extractEmail(parsed.bcc),
+      textBody: parsed.text,
+      htmlBody: parsed.html ? parsed.html.toString() : undefined,
+      folder,
+      hasAttachments: (parsed.attachments?.length || 0) > 0,
+      receivedAt: parsed.date || new Date(),
+    };
+  }
+
+  private extractEmail(addressObj: any): string {
+    if (!addressObj) return '';
+    
+    if (Array.isArray(addressObj)) {
+      return addressObj.map(addr => addr.address).join(', ');
+    }
+    
+    if (addressObj.value) {
+      return addressObj.value.map((addr: any) => addr.address).join(', ');
+    }
+    
+    return String(addressObj);
+  }
+}
+```
+
+---
+
+### 2.3 Email Sync Orchestration Service
+
+**Create `src/services/email/sync.service.ts`**:
+
+```typescript
+import { PrismaClient } from '@prisma/client';
+import { ImapService } from './imap.service';
+import { EmailParserService } from './parser.service';
+import { EmailAccountConfig, EmailSyncStatus } from '../../types/email.types';
+
+export class EmailSyncService {
+  private prisma: PrismaClient;
+  private parser: EmailParserService;
+  private imapConnections: Map<string, ImapService> = new Map();
+  private syncStatuses: Map<string, EmailSyncStatus> = new Map();
+
+  constructor(prisma: PrismaClient) {
+    this.prisma = prisma;
+    this.parser = new EmailParserService();
+  }
+
+  async addAccount(config: EmailAccountConfig): Promise<void> {
+    // Save account to database
+    await this.prisma.emailAccount.upsert({
+      where: { email: config.email },
+      update: {
+        provider: config.provider,
+        imapHost: config.imapHost,
+        imapPort: config.imapPort,
+      },
+      create: {
+        id: config.id,
+        email: config.email,
+        provider: config.provider,
+        imapHost: config.imapHost,
+        imapPort: config.imapPort,
+      },
+    });
+
+    // Create IMAP connection
+    const imapService = new ImapService(config);
+
+    imapService.on('newMail', async (count) => {
+      console.log(`📨 Processing ${count} new email(s) for ${config.email}`);
+      await this.syncRecentEmails(config.id);
+    });
+
+    await imapService.connect();
+    this.imapConnections.set(config.id, imapService);
+
+    this.syncStatuses.set(config.id, {
+      accountId: config.id,
+      status: 'connected',
+      lastSync: new Date(),
+    });
+
+    // Initial sync - last 30 days
+    await this.syncHistoricalEmails(config.id, 30);
+  }
+
+  private async syncHistoricalEmails(accountId: string, daysBack: number): Promise<void> {
+    const imapService = this.imapConnections.get(accountId);
+    if (!imapService) return;
+
+    console.log(`🔄 Syncing last ${daysBack} days for account ${accountId}`);
+
+    try {
+      const uids = await imapService.fetchEmails('INBOX', daysBack);
+      
+      for (const uid of uids) {
+        await this.processEmail(accountId, uid, 'INBOX');
+      }
+
+      console.log(`✅ Synced ${uids.length} emails for account ${accountId}`);
+    } catch (error) {
+      console.error(`❌ Error syncing historical emails:`, error);
+    }
+  }
+
+  private async syncRecentEmails(accountId: string): Promise<void> {
+    const imapService = this.imapConnections.get(accountId);
+    if (!imapService) return;
+
+    try {
+      const uids = await imapService.fetchEmails('INBOX', 1); // Last 1 day
+      
+      for (const uid of uids) {
+        await this.processEmail(accountId, uid, 'INBOX');
+      }
+    } catch (error) {
+      console.error(`❌ Error syncing recent emails:`, error);
+    }
+  }
+
+  private async processEmail(accountId: string, uid: number, folder: string): Promise<void> {
+    const imapService = this.imapConnections.get(accountId);
+    if (!imapService) return;
+
+    try {
+      const emailBuffer = await imapService.fetchEmailById(uid);
+      const parsedEmail = await this.parser.parseEmail(emailBuffer, folder);
+
+      // Check if email already exists
+      const existing = await this.prisma.email.findUnique({
+        where: { messageId: parsedEmail.messageId },
+      });
+
+      if (existing) {
+        console.log(`⏭️  Email already exists: ${parsedEmail.subject}`);
+        return;
+      }
+
+      // Save to database
+      const savedEmail = await this.prisma.email.create({
+        data: {
+          accountId,
+          messageId: parsedEmail.messageId,
+          subject: parsedEmail.subject,
+          from: parsedEmail.from,
+          to: parsedEmail.to,
+          cc: parsedEmail.cc,
+          bcc: parsedEmail.bcc,
+          textBody: parsedEmail.textBody,
+          htmlBody: parsedEmail.htmlBody,
+          folder: parsedEmail.folder,
+          hasAttachments: parsedEmail.hasAttachments,
+          receivedAt: parsedEmail.receivedAt,
+        },
+      });
+
+      console.log(`💾 Saved email: ${savedEmail.subject}`);
+
+      // Emit event for downstream processing (AI categorization, indexing)
+      this.emit('emailSaved', savedEmail);
+    } catch (error) {
+      console.error(`❌ Error processing email ${uid}:`, error);
+    }
+  }
+
+  private emit(event: string, data: any): void {
+    // This will be used by AI categorization and Elasticsearch indexing
+    // For now, just log
+    console.log(`📢 Event: ${event}`, data.id);
+  }
+
+  getSyncStatus(accountId: string): EmailSyncStatus | undefined {
+    return this.syncStatuses.get(accountId);
+  }
+
+  getAllSyncStatuses(): EmailSyncStatus[] {
+    return Array.from(this.syncStatuses.values());
+  }
+
+  async disconnect(accountId: string): Promise<void> {
+    const imapService = this.imapConnections.get(accountId);
+    if (imapService) {
+      imapService.disconnect();
+      this.imapConnections.delete(accountId);
+    }
+  }
+
+  async disconnectAll(): Promise<void> {
+    for (const [accountId] of this.imapConnections) {
+      await this.disconnect(accountId);
+    }
+  }
+}
+```
+
+---
+
+## Module 3: Elasticsearch Integration (Level 2)
+
+### 3.1 Elasticsearch Client Setup
+
+**Install dependencies**:
+```bash
+npm install @elastic/elasticsearch
+```
+
+**Create `src/config/elasticsearch.ts`**:
+
+```typescript
+import { Client } from '@elastic/elasticsearch';
+
+const esClient = new Client({
+  node: process.env.ELASTICSEARCH_URL || 'http://localhost:9200',
+});
+
+export default esClient;
+```
+
+---
+
+### 3.2 Elasticsearch Service
+
+**Create `src/services/search/elasticsearch.service.ts`**:
+
+```typescript
+import { Client } from '@elastic/elasticsearch';
+import esClient from '../../config/elasticsearch';
+
+export interface EmailDocument {
+  id: string;
+  accountId: string;
+  messageId: string;
+  subject: string;
+  from: string;
+  to: string;
+  textBody?: string;
+  htmlBody?: string;
+  category?: string;
+  folder: string;
+  receivedAt: Date;
+}
+
+export interface SearchQuery {
+  query?: string;
+  accountId?: string;
+  folder?: string;
+  category?: string;
+  from?: string;
+  dateFrom?: Date;
+  dateTo?: Date;
+  page?: number;
+  pageSize?: number;
+}
+
+export class ElasticsearchService {
+  private client: Client;
+  private indexName = 'emails';
+
+  constructor() {
+    this.client = esClient;
+  }
+
+  async initializeIndex(): Promise<void> {
+    const indexExists = await this.client.indices.exists({
+      index: this.indexName,
+    });
+
+    if (!indexExists) {
+      await this.client.indices.create({
+        index: this.indexName,
+        body: {
+          mappings: {
+            properties: {
+              id: { type: 'keyword' },
+              accountId: { type: 'keyword' },
+              messageId: { type: 'keyword' },
+              subject: { type: 'text', analyzer: 'standard' },
+              from: { type: 'keyword' },
+              to: { type: 'keyword' },
+              textBody: { type: 'text', analyzer: 'standard' },
+              htmlBody: { type: 'text', analyzer: 'standard' },
+              category: { type: 'keyword' },
+              folder: { type: 'keyword' },
+              receivedAt: { type: 'date' },
+            },
+          },
+          settings: {
+            number_of_shards: 1,
+            number_of_replicas: 0,
+          },
+        },
+      });
+
+      console.log('✅ Elasticsearch index created');
+    }
+  }
+
+  async indexEmail(email: EmailDocument): Promise<void> {
+    await this.client.index({
+      index: this.indexName,
+      id: email.id,
+      document: email,
+    });
+
+    console.log(`🔍 Indexed email: ${email.subject}`);
+  }
+
+  async search(searchQuery: SearchQuery): Promise<any> {
+    const must: any[] = [];
+
+    // Full-text search
+    if (searchQuery.query) {
+      must.push({
+        multi_match: {
+          query: searchQuery.query,
+          fields: ['subject^2', 'textBody', 'htmlBody'],
+        },
+      });
+    }
+
+    // Filters
+    if (searchQuery.accountId) {
+      must.push({ term: { accountId: searchQuery.accountId } });
+    }
+
+    if (searchQuery.folder) {
+      must.push({ term: { folder: searchQuery.folder } });
+    }
+
+    if (searchQuery.category) {
+      must.push({ term: { category: searchQuery.category } });
+    }
+
+    if (searchQuery.from) {
+      must.push({ term: { from: searchQuery.from } });
+    }
+
+    if (searchQuery.dateFrom || searchQuery.dateTo) {
+      const range: any = {};
+      if (searchQuery.dateFrom) range.gte = searchQuery.dateFrom;
+      if (searchQuery.dateTo) range.lte = searchQuery.dateTo;
+      must.push({ range: { receivedAt: range } });
+    }
+
+    const page = searchQuery.page || 1;
+    const pageSize = searchQuery.pageSize || 20;
+
+    const result = await this.client.search({
+      index: this.indexName,
+      body: {
+        query: must.length > 0 ? { bool: { must } } : { match_all: {} },
+        from: (page - 1) * pageSize,
+        size: pageSize,
+        sort: [{ receivedAt: { order: 'desc' } }],
+      },
+    });
+
+    return {
+      total: result.hits.total,
+      emails: result.hits.hits.map((hit: any) => hit._source),
+    };
+  }
+
+  async deleteEmail(emailId: string): Promise<void> {
+    await this.client.delete({
+      index: this.indexName,
+      id: emailId,
+    });
+  }
+}
+```
+
+---
+
+## Module 4: AI Categorization Service (Level 3)
+
+### 4.1 OpenAI Integration
+
+**Install dependencies**:
+```bash
+npm install openai
+```
+
+**Create `src/services/ai/categorization.service.ts`**:
+
+```typescript
+import OpenAI from 'openai';
+
+export type EmailCategory = 
+  | 'Interested' 
+  | 'Meeting Booked' 
+  | 'Not Interested' 
+  | 'Spam' 
+  | 'Out of Office'
+  | 'General';
+
+export interface CategorizationResult {
+  category: EmailCategory;
+  confidence: number;
+  reasoning?: string;
+}
+
+export class CategorizationService {
+  private openai: OpenAI;
+
+  constructor() {
+    this.openai = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY,
+    });
+  }
+
+  async categorizeEmail(
+    subject: string,
+    body: string,
+    from: string
+  ): Promise<CategorizationResult> {
+    const prompt = this.buildCategorizationPrompt(subject, body, from);
+
+    try {
+      const response = await this.openai.chat.completions.create({
+        model: 'gpt-3.5-turbo',
+        messages: [
+          {
+            role: 'system',
+            content: `You are an email categorization assistant. Categorize emails into one of these categories:
+- Interested: The sender shows interest in your product/service
+- Meeting Booked: A meeting or call has been scheduled
+- Not Interested: Polite rejection or no interest
+- Spam: Unsolicited promotional content
+- Out of Office: Automated out-of-office reply
+- General: Everything else
+
+Respond in JSON format: {"category": "...", "confidence": 0.0-1.0, "reasoning": "..."}`,
+          },
+          {
+            role: 'user',
+            content: prompt,
+          },
+        ],
+        temperature: 0.3,
+        response_format: { type: 'json_object' },
+      });
+
+      const result = JSON.parse(response.choices[0].message.content || '{}');
+      
+      return {
+        category: result.category || 'General',
+        confidence: result.confidence || 0.5,
+        reasoning: result.reasoning,
+      };
+    } catch (error) {
+      console.error('❌ Error categorizing email:', error);
+      return {
+        category: 'General',
+        confidence: 0,
+        reasoning: 'Categorization failed',
+      };
+    }
+  }
+
+  private buildCategorizationPrompt(subject: string, body: string, from: string): string {
+    const bodyPreview = body.substring(0, 500); // Limit token usage
+    
+    return `
+From: ${from}
+Subject: ${subject}
+
+Body:
+${bodyPreview}
+
+Categorize this email.
+    `.trim();
+  }
+}
+```
+
+---
+
+## Module 5: Notification Service (Level 4)
+
+### 5.1 Slack Integration
+
+**Install dependencies**:
+```bash
+npm install @slack/web-api
+```
+
+**Create `src/services/notification/slack.service.ts`**:
+
+```typescript
+import { WebClient } from '@slack/web-api';
+
+export interface SlackNotification {
+  emailId: string;
+  subject: string;
+  from: string;
+  category: string;
+  receivedAt: Date;
+}
+
+export class SlackService {
+  private client: WebClient;
+  private channelId: string;
+
+  constructor() {
+    this.client = new WebClient(process.env.SLACK_BOT_TOKEN);
+    this.channelId = process.env.SLACK_CHANNEL_ID || '';
+  }
+
+  async sendEmailNotification(notification: SlackNotification): Promise<void> {
+    try {
+      await this.client.chat.postMessage({
+        channel: this.channelId,
+        text: `🎯 New Interested Email!`,
+        blocks: [
+          {
+            type: 'header',
+            text: {
+              type: 'plain_text',
+              text: '🎯 New Interested Email',
+              emoji: true,
+            },
+          },
+          {
+            type: 'section',
+            fields: [
+              {
+                type: 'mrkdwn',
+                text: `*From:*\n${notification.from}`,
+              },
+              {
+                type: 'mrkdwn',
+                text: `*Category:*\n${notification.category}`,
+              },
+              {
+                type: 'mrkdwn',
+                text: `*Subject:*\n${notification.subject}`,
+              },
+              {
+                type: 'mrkdwn',
+                text: `*Received:*\n${notification.receivedAt.toLocaleString()}`,
+              },
+            ],
+          },
+          {
+            type: 'actions',
+            elements: [
+              {
+                type: 'button',
+                text: {
+                  type: 'plain_text',
+                  text: 'View Email',
+                },
+                url: `http://localhost:3000/emails/${notification.emailId}`,
+                style: 'primary',
+              },
+            ],
+          },
+        ],
+      });
+
+      console.log('✅ Slack notification sent');
+    } catch (error) {
+      console.error('❌ Error sending Slack notification:', error);
+    }
+  }
+}
+```
+
+---
+
+### 5.2 Webhook Service
+
+**Create `src/services/notification/webhook.service.ts`**:
+
+```typescript
+import axios from 'axios';
+
+export interface WebhookPayload {
+  emailId: string;
+  subject: string;
+  from: string;
+  category: string;
+  receivedAt: Date;
+}
+
+export class WebhookService {
+  private webhookUrl: string;
+
+  constructor() {
+    this.webhookUrl = process.env.WEBHOOK_URL || '';
+  }
+
+  async sendWebhook(payload: WebhookPayload): Promise<void> {
+    if (!this.webhookUrl) {
+      console.warn('⚠️  Webhook URL not configured');
+      return;
+    }
+
+    try {
+      await axios.post(this.webhookUrl, payload, {
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      console.log('✅ Webhook sent successfully');
+    } catch (error) {
+      console.error('❌ Error sending webhook:', error);
+    }
+  }
+}
+```
+
+---
+
+## Module 6: BetterAuth Setup & Authentication
+
+### 6.1 BetterAuth Configuration
+
+**Create `src/config/auth.ts`**:
+
+```typescript
+import { betterAuth } from 'better-auth';
+import { prismaAdapter } from 'better-auth/adapters/prisma';
+import { PrismaClient } from '@prisma/client';
+
+const prisma = new PrismaClient();
+
+export const auth = betterAuth({
+  database: prismaAdapter(prisma, {
+    provider: 'postgresql',
+  }),
+  emailAndPassword: {
+    enabled: true,
+  },
+  session: {
+    expiresIn: 60 * 60 * 24 * 7, // 7 days
+    updateAge: 60 * 60 * 24, // 1 day
+  },
+});
+
+export type Session = typeof auth.$Infer.Session;
+```
+
+---
+
+### 6.2 Auth Middleware
+
+**Create `src/middleware/auth.middleware.ts`**:
+
+```typescript
+import { Context, Next } from 'hono';
+import { auth } from '../config/auth';
+
+export async function authMiddleware(c: Context, next: Next) {
+  const session = await auth.api.getSession({
+    headers: c.req.raw.headers,
+  });
+
+  if (!session) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+
+  // Attach user to context
+  c.set('user', session.user);
+  c.set('session', session.session);
+
+  await next();
+}
+```
+
+---
+
+### 6.3 Auth Routes
+
+**Create `src/routes/auth.routes.ts`**:
+
+```typescript
+import { Hono } from 'hono';
+import { auth } from '../config/auth';
+
+const authRoutes = new Hono();
+
+// Sign up
+authRoutes.post('/signup', async (c) => {
+  const { email, password, name } = await c.req.json();
+
+  try {
+    const result = await auth.api.signUpEmail({
+      body: {
+        email,
+        password,
+        name,
+      },
+    });
+
+    return c.json(result);
+  } catch (error: any) {
+    return c.json({ error: error.message }, 400);
+  }
+});
+
+// Sign in
+authRoutes.post('/signin', async (c) => {
+  const { email, password } = await c.req.json();
+
+  try {
+    const result = await auth.api.signInEmail({
+      body: {
+        email,
+        password,
+      },
+    });
+
+    return c.json(result);
+  } catch (error: any) {
+    return c.json({ error: error.message }, 401);
+  }
+});
+
+// Sign out
+authRoutes.post('/signout', async (c) => {
+  await auth.api.signOut({
+    headers: c.req.raw.headers,
+  });
+
+  return c.json({ message: 'Signed out successfully' });
+});
+
+// Get current session
+authRoutes.get('/session', async (c) => {
+  const session = await auth.api.getSession({
+    headers: c.req.raw.headers,
+  });
+
+  if (!session) {
+    return c.json({ error: 'Not authenticated' }, 401);
+  }
+
+  return c.json(session);
+});
+
+export default authRoutes;
+```
+
+---
+
+## Module 7: API Routes with Hono
+
+### 7.1 Email Routes
+
+**Create `src/routes/email.routes.ts`**:
+
+```typescript
+import { Hono } from 'hono';
+import { PrismaClient } from '@prisma/client';
+import { authMiddleware } from '../middleware/auth.middleware';
+
+const prisma = new PrismaClient();
+const emailRoutes = new Hono();
+
+// Apply auth middleware to all routes
+emailRoutes.use('/*', authMiddleware);
+
+// Get all emails
+emailRoutes.get('/', async (c) => {
+  try {
+    const { accountId, folder, category, page = '1', limit = '20' } = c.req.query();
+
+    const where: any = {};
+    if (accountId) where.accountId = accountId;
+    if (folder) where.folder = folder;
+    if (category) where.category = category;
+
+    const emails = await prisma.email.findMany({
+      where,
+      include: {
+        account: true,
+      },
+      orderBy: {
+        receivedAt: 'desc',
+      },
+      skip: (Number(page) - 1) * Number(limit),
+      take: Number(limit),
+    });
+
+    const total = await prisma.email.count({ where });
+
+    return c.json({
+      emails,
+      pagination: {
+        page: Number(page),
+        limit: Number(limit),
+        total,
+        totalPages: Math.ceil(total / Number(limit)),
+      },
+    });
+  } catch (error) {
+    return c.json({ error: 'Failed to fetch emails' }, 500);
+  }
+});
+
+// Get email by ID
+emailRoutes.get('/:id', async (c) => {
+  try {
+    const id = c.req.param('id');
+
+    const email = await prisma.email.findUnique({
+      where: { id },
+      include: {
+        account: true,
+      },
+    });
+
+    if (!email) {
+      return c.json({ error: 'Email not found' }, 404);
+    }
+
+    return c.json(email);
+  } catch (error) {
+    return c.json({ error: 'Failed to fetch email' }, 500);
+  }
+});
+
+// Get all accounts
+emailRoutes.get('/accounts/list', async (c) => {
+  try {
+    const accounts = await prisma.emailAccount.findMany({
+      include: {
+        _count: {
+          select: { emails: true },
+        },
+      },
+    });
+
+    return c.json(accounts);
+  } catch (error) {
+    return c.json({ error: 'Failed to fetch accounts' }, 500);
+  }
+});
+
+export default emailRoutes;
+```
+
+---
+
+### 7.2 Search Routes
+
+**Create `src/routes/search.routes.ts`**:
+
+```typescript
+import { Hono } from 'hono';
+import { ElasticsearchService } from '../services/search/elasticsearch.service';
+import { authMiddleware } from '../middleware/auth.middleware';
+
+const esService = new ElasticsearchService();
+const searchRoutes = new Hono();
+
+// Apply auth middleware
+searchRoutes.use('/*', authMiddleware);
+
+// Search emails
+searchRoutes.get('/', async (c) => {
+  try {
+    const {
+      query,
+      accountId,
+      folder,
+      category,
+      from,
+      dateFrom,
+      dateTo,
+      page,
+      pageSize,
+    } = c.req.query();
+
+    const results = await esService.search({
+      query: query || undefined,
+      accountId: accountId || undefined,
+      folder: folder || undefined,
+      category: category || undefined,
+      from: from || undefined,
+      dateFrom: dateFrom ? new Date(dateFrom) : undefined,
+      dateTo: dateTo ? new Date(dateTo) : undefined,
+      page: page ? Number(page) : undefined,
+      pageSize: pageSize ? Number(pageSize) : undefined,
+    });
+
+    return c.json(results);
+  } catch (error) {
+    return c.json({ error: 'Search failed' }, 500);
+  }
+});
+
+export default searchRoutes;
+```
+
+---
+
+### 7.3 Error Middleware
+
+**Create `src/middleware/error.middleware.ts`**:
+
+```typescript
+import { Context } from 'hono';
+import { HTTPException } from 'hono/http-exception';
+
+export async function errorHandler(err: Error, c: Context) {
+  if (err instanceof HTTPException) {
+    return c.json(
+      {
+        error: err.message,
+      },
+      err.status
+    );
+  }
+
+  console.error('Unexpected error:', err);
+
+  return c.json(
+    {
+      error: 'Internal Server Error',
+    },
+    500
+  );
+}
+```
+
+---
+
+### 7.4 Main Server Setup with Hono
+
+**Create `src/index.ts`**:
+
+```typescript
+import { Hono } from 'hono';
+import { serve } from '@hono/node-server';
+import { cors } from 'hono/cors';
+import { logger } from 'hono/logger';
+import dotenv from 'dotenv';
+import { PrismaClient } from '@prisma/client';
+import { EmailSyncService } from './services/email/sync.service';
+import { ElasticsearchService } from './services/search/elasticsearch.service';
+import { CategorizationService } from './services/ai/categorization.service';
+import { SlackService } from './services/notification/slack.service';
+import { WebhookService } from './services/notification/webhook.service';
+import { errorHandler } from './middleware/error.middleware';
+import emailRoutes from './routes/email.routes';
+import searchRoutes from './routes/search.routes';
+import authRoutes from './routes/auth.routes';
+
+dotenv.config();
+
+const app = new Hono();
+const prisma = new PrismaClient();
+const PORT = Number(process.env.PORT) || 3000;
+
+// Middleware
+app.use('*', logger());
+app.use('*', cors());
+
+// Health check
+app.get('/health', (c) => {
+  return c.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Routes
+app.route('/api/auth', authRoutes);
+app.route('/api/emails', emailRoutes);
+app.route('/api/search', searchRoutes);
+
+// Error handler
+app.onError(errorHandler);
+
+// 404 handler
+app.notFound((c) => {
+  return c.json({ error: 'Route not found' }, 404);
+});
+
+// Initialize services
+async function initializeServices() {
+  console.log('🔧 Initializing services...');
+  
+  // Initialize Elasticsearch
+  const esService = new ElasticsearchService();
+  await esService.initializeIndex();
+
+  // Initialize email sync
+  const emailSyncService = new EmailSyncService(prisma);
+  const categorizationService = new CategorizationService();
+  const slackService = new SlackService();
+  const webhookService = new WebhookService();
+
+  // Add email accounts from environment
+  const accounts = [
+    {
+      id: 'account-1',
+      email: process.env.EMAIL_1_ADDRESS!,
+      password: process.env.EMAIL_1_PASSWORD!,
+      imapHost: process.env.EMAIL_1_IMAP_HOST!,
+      imapPort: Number(process.env.EMAIL_1_IMAP_PORT!),
+      provider: 'gmail' as const,
+    },
+    {
+      id: 'account-2',
+      email: process.env.EMAIL_2_ADDRESS!,
+      password: process.env.EMAIL_2_PASSWORD!,
+      imapHost: process.env.EMAIL_2_IMAP_HOST!,
+      imapPort: Number(process.env.EMAIL_2_IMAP_PORT!),
+      provider: 'gmail' as const,
+    },
+  ];
+
+  for (const account of accounts) {
+    if (account.email && account.password) {
+      await emailSyncService.addAccount(account);
+    }
+  }
+
+  console.log('✅ All services initialized');
+}
+
+// Start server
+console.log(`🚀 Starting server on port ${PORT}...`);
+
+serve({
+  fetch: app.fetch,
+  port: PORT,
+}, async (info) => {
+  console.log(`✅ Server running at http://localhost:${info.port}`);
+  await initializeServices();
+});
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('\n👋 Shutting down gracefully...');
+  await prisma.$disconnect();
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  console.log('\n👋 Shutting down gracefully...');
+  await prisma.$disconnect();
+  process.exit(0);
+});
+```
+
+**Update `package.json` scripts**:
+
+```json
+{
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:studio": "prisma studio"
+  }
+}
+```
+
+---
+
+## Module 7: Frontend (Level 5)
+
+### 7.1 React Setup
+
+```bash
+cd ..
+npx create-react-app frontend --template typescript
+cd frontend
+npm install axios react-router-dom
+npm install --save-dev @types/react-router-dom
+```
+
+**Frontend structure** (brief overview - full implementation would be extensive):
+
+```
+frontend/src/
+├── components/
+│   ├── EmailList.tsx
+│   ├── EmailDetail.tsx
+│   ├── SearchBar.tsx
+│   ├── FilterPanel.tsx
+│   └── CategoryBadge.tsx
+├── services/
+│   └── api.ts
+├── types/
+│   └── email.types.ts
+├── App.tsx
+└── index.tsx
+```
+
+---
+
+## Module 8: RAG & Suggested Replies (Level 6)
+
+**Install dependencies**:
+```bash
+npm install pinecone-client langchain
+```
+
+This module involves:
+1. Setting up Pinecone vector database
+2. Creating embeddings for product documentation
+3. Building RAG pipeline with LangChain
+4. Implementing suggested reply endpoint
+
+---
+
+## Implementation Timeline
+
+| Module | Time Estimate | Priority |
+|--------|---------------|----------|
+| Module 1: Foundation | 2-3 hours | Critical |
+| Module 2: Email Sync | 6-8 hours | Critical |
+| Module 3: Elasticsearch | 3-4 hours | High |
+| Module 4: AI Categorization | 2-3 hours | High |
+| Module 5: Notifications | 2-3 hours | Medium |
+| Module 6: API Layer | 2-3 hours | High |
+| Module 7: Frontend | 6-8 hours | High |
+| Module 8: RAG | 8-10 hours | Optional |
+
+---
+
+## Testing Strategy
+
+### Unit Testing
+- Test email parsing with sample emails
+- Test categorization with known email types
+- Test search queries
+
+### Integration Testing
+- Test IMAP connection with real accounts
+- Test Elasticsearch indexing
+- Test end-to-end email flow
+
+### Manual Testing
+- Use Postman for API testing
+- Test real-time email reception
+- Verify Slack notifications
+- Check webhook.site for webhook delivery
+
+---
+
+## Deployment Checklist
+
+- [ ] Environment variables configured
+- [ ] Docker containers running
+- [ ] Database migrations applied
+- [ ] Elasticsearch index created
+- [ ] Email accounts connected
+- [ ] API endpoints tested
+- [ ] Frontend built and served
+- [ ] Documentation complete
+- [ ] Demo video recorded

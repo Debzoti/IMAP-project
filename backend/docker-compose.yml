@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: IMAP-postgres
+    environment:
+      POSTGRES_USER: imap
+      POSTGRES_PASSWORD: imap
+      POSTGRES_DB: imap
+    ports:
+      - "5432:5432"
+    volumes:
+      - imap_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U imap" ]
+      interval: 1m30s
+      timeout: 30s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  imap_postgres_data:
