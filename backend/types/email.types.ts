@@ -1,3 +1,4 @@
+
 export interface EmailAccountConfig {
     email: string;
     password: string;
@@ -6,12 +7,15 @@ export interface EmailAccountConfig {
 }
 
 export interface parsedEmail {
-    subject: string;
-    body: string;
-    from: string;
-    to: string;
-    cc: string;
-    bcc: string;
-    date: string;
-    id: string;
+    messageId: string;
+  subject: string;
+  from: string;
+  to: string;
+  cc?: string;
+  bcc?: string;
+  textBody?: string;
+  htmlBody?: string;
+  folder: string;
+  hasAttachments: boolean;
+  receivedAt: Date;
 }
